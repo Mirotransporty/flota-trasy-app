@@ -2,8 +2,10 @@ import streamlit as st
 import pandas as pd
 import folium
 from streamlit_folium import st_folium
+from geopy.geocoders import Nominatim
+from geopy.exc import GeocoderUnavailable
 
-# Maksymalne parametry
+# Maksymalne parametry pojazdów
 MAX_KG = 1200
 MAX_LDM = 4.8
 
@@ -13,93 +15,97 @@ pojazdy = [
     "TK654CH", "TK564CH", "OP4556U", "SB4432V"
 ]
 dni = ["Poniedziałek", "Wtorek", "Środa", "Czwartek", "Piątek", "Sobota", "Niedziela"]
+\# Inicjalizacja tabeli zdarzeń (dynamiczna)
+if 'events_df' not in st.session_state:
+    st.session_state.events_df = pd.DataFrame(
+        columns=["Vehicle", "Day", "Type", "City", "Masa", "LDM"]
+    )
 
-# Przygotowanie DataFrame z płaskimi nazwami kolumn dni_Miasto, dni_Masa, dni_LDM
-data = {}
-for dzien in dni:
-    data[f"{dzien}_Miasto"] = ["" for _ in pojazdy]
-    data[f"{dzien}_Masa"] = ["" for _ in pojazdy]
-    data[f"{dzien}_LDM"] = ["" for _ in pojazdy]
-
-df = pd.DataFrame(data, index=pojazdy)
-
-st.title("🗺️ Plan trasy i obciążenia pojazdów")
-st.subheader("📋 Tabela zleceń")
-# Edytowalna tabela
-edited_df = st.data_editor(
-    df,
-    num_rows="fixed",
+events_df = st.data_editor(
+    st.session_state.events_df,
     use_container_width=True,
-    key="tabela_zlecen"
+    key="events",
+    num_rows="dynamic"
 )
 
-st.subheader("🧭 Mapa trasy")
+# Walidacja i kategorie
+if not events_df.empty:
+    events_df['Vehicle'] = events_df['Vehicle'].astype(
+        pd.CategoricalDtype(categories=pojazdy)
+    )
+    events_df['Day'] = events_df['Day'].astype(
+        pd.CategoricalDtype(categories=dni)
+    )
+    events_df['Type'] = events_df['Type'].astype(
+        pd.CategoricalDtype(categories=["Z", "R"])
+    )
+
+st.subheader("🧭 Mapa tras")
 mapa = folium.Map(location=[52.0, 19.0], zoom_start=6)
+\# Geokoder z cache'em
+geolocator = Nominatim(user_agent="flota_app")
+if 'geo_cache' not in st.session_state:
+    st.session_state.geo_cache = {}
 
-# Przygotowanie kolorów i przykładowej geolokalizacji
-kolory = ["red", "green", "blue", "orange", "purple", "darkred", "cadetblue", "darkgreen"]
-geolokalizacja = {
-    "Jaworzno": [50.205, 19.275],
-    "Katowice": [50.2649, 19.0238],
-    "Orzesze": [50.1503, 18.7838],
-    "Warszawa": [52.2297, 21.0122],
-    "Sieradz": [51.5955, 18.7394],
-    "Poznań": [52.4064, 16.9252],
-    "Łódź": [51.7592, 19.4560],
-    "Czeladź": [50.3167, 19.1000],
-    "Głuchołazy": [50.3142, 17.3833],
-    "Kartuzy": [54.3333, 18.2000],
-    "Koźle": [50.3558, 18.2311],
-    "Opole": [50.6751, 17.9213],
-    "Bielsko-Biała": [49.8225, 19.0444],
-    "Puławy": [51.4167, 21.9667]
-}
+# Budujemy trasy dla każdego pojazdu
+for veh in pojazdy:
+    dfv = events_df[events_df['Vehicle'] == veh].dropna(subset=["City", "Day"])
+    if dfv.empty:
+        continue
+    # Sortujemy wg kolejności dni
+    order = {day: idx for idx, day in enumerate(dni)}
+    dfv = dfv.sort_values('Day', key=lambda col: col.map(order))
 
-# Rysowanie tras
-for idx, pojazd in enumerate(pojazdy):
-    kolor = kolory[idx % len(kolory)]
+    punkty = []
     suma_kg = 0.0
     suma_ldm = 0.0
-    punkty = []
 
-    for dzien in dni:
-        miasto = str(edited_df.at[pojazd, f"{dzien}_Miasto"]).strip().title()
-        masa = edited_df.at[pojazd, f"{dzien}_Masa"]
-        ldm = edited_df.at[pojazd, f"{dzien}_LDM"]
-
-        # Dodaj punkt, jeśli miasto jest w geolokalizacji
-        if miasto and miasto in geolokalizacja:
-            wsp = geolokalizacja[miasto]
-            popup = (f"<b>{pojazd}</b><br>" +
-                     f"{dzien}: {miasto}<br>" +
-                     f"Masa: {masa} kg<br>LDM: {ldm}")
-            folium.Marker(
-                location=wsp,
-                popup=popup,
-                icon=folium.Icon(color=kolor)
-            ).add_to(mapa)
-            punkty.append(wsp)
-            # Sumuj wartości, jeśli są liczbami
+    for row in dfv.itertuples():
+        city = row.City.strip().title()
+        # Geokodowanie
+        coords = st.session_state.geo_cache.get(city)
+        if coords is None:
             try:
-                suma_kg += float(masa)
-                suma_ldm += float(ldm)
-            except:
-                pass
+                loc = geolocator.geocode(f"{city}, Poland")
+                coords = (loc.latitude, loc.longitude) if loc else None
+            except GeocoderUnavailable:
+                coords = None
+            st.session_state.geo_cache[city] = coords
+        if not coords:
+            continue
 
-    # Rysuj linię, jeśli co najmniej 2 punkty
+        # Marker
+        popup = (
+            f"<b>{veh}</b> {row.Type} {row.Day}<br>"
+            f"{city}<br>Masa: {row.Masa} kg | {row.LDM} LDM"
+        )
+        folium.Marker(
+            location=coords,
+            popup=popup,
+            icon=folium.Icon(color="blue", icon="truck", prefix='fa')
+        ).add_to(mapa)
+
+        punkty.append(coords)
+        # Sumujemy
+        try:
+            suma_kg += float(row.Masa)
+            suma_ldm += float(row.LDM)
+        except:
+            pass
+
+    # Rysujemy linię
     if len(punkty) > 1:
-        color_border = "red" if suma_kg > MAX_KG or suma_ldm > MAX_LDM else kolor
+        kolor = "red" if suma_kg > MAX_KG or suma_ldm > MAX_LDM else "green"
         folium.PolyLine(
             punkty,
-            color=color_border,
+            color=kolor,
             weight=5,
             opacity=0.8
         ).add_to(mapa)
 
-# Wyświetl mapę
 st_folium(mapa, width=1000, height=600)
 
 st.caption(
-    "Wprowadź dla każdego dnia: Miasto oraz wartości Masa (kg) i LDM. "
-    "Trasa będzie rysowana automatycznie, a przeciążenia oznaczone czerwoną linią."
-)
+    "Tabela pozwala dodawać wiele zdarzeń (wiele wierszy) dla każdego pojazdu. "
+    "Kolumna Type: Z = Załadunek, R = Rozładunek. Masa i LDM to odrębne kolumny. "
+    "Geokodowanie dowolnych miast w Polsce.")

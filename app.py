@@ -1,28 +1,47 @@
 import streamlit as st
 import pandas as pd
 
-# konfiguracja
+# 1) Konfiguracja
 vehicles = ["TK227CK","TK742AG","ESI461A","ESI4217","TK654CH","TK564CH","OP4556U","SB4432V"]
-days = ["Poniedziałek","Wtorek","Środa","Czwartek","Piątek","Sobota","Niedziela"]
-slots = range(1,6)
+days     = ["Poniedziałek","Wtorek","Środa","Czwartek","Piątek","Sobota","Niedziela"]
+slots    = 5  # 5 pod-wierszy
 
-# budowa kolumn
-cols = ["Vehicle"]
-for d in days:
-    for s in slots:
-        cols += [f"{d}#{s}_Miejsce", f"{d}#{s}_Z/R", f"{d}#{s}_Masa", f"{d}#{s}_LDM"]
+# Przechowujemy dane w session_state jako słownik pojazd → DataFrame 
+if "vehicle_events" not in st.session_state:
+    st.session_state.vehicle_events = {
+        v: pd.DataFrame({
+            "Day": [""]*slots,
+            "City": [""]*slots,
+            "Masa": [""]*slots,
+            "LDM": [""]*slots,
+            "Type": [""]*slots,
+        }) for v in vehicles
+    }
 
-# inicjalizacja
-if "df" not in st.session_state:
-    data = []
-    for v in vehicles:
-        row = {"Vehicle": v}
-        for c in cols[1:]:
-            row[c] = ""
-        data.append(row)
-    st.session_state.df = pd.DataFrame(data, columns=cols)
+st.title("📋 Harmonogram zdarzeń dla pojazdów")
 
-df = st.session_state.df
-# edycja
-edited = st.data_editor(df, use_container_width=True, num_rows="fixed", key="tabela")
-st.session_state.df = edited
+# 2) Renderujemy expandery—pojazd → jego 5-wierszowa tabela
+for v in vehicles:
+    df_v = st.session_state.vehicle_events[v]
+    with st.expander(f"🚚 {v}", expanded=False):
+        edited = st.data_editor(
+            df_v,
+            num_rows="fixed",
+            use_container_width=True,
+            key=f"ed_{v}"
+        )
+        st.session_state.vehicle_events[v] = edited
+
+# Teraz zbieramy wszystkie zdarzenia w jeden DataFrame
+all_events = []
+for v, df_v in st.session_state.vehicle_events.items():
+    df = df_v.copy()
+    df["Vehicle"] = v
+    all_events.append(df)
+combined = pd.concat(all_events, ignore_index=True)
+
+st.subheader("✅ Wszystkie zdarzenia")
+st.dataframe(combined)
+
+# 3) (w kolejnym kroku) – na bazie `combined` możesz zbudować mapę
+#    filtrujesz combined.dropna(subset=["City","Day"]), geokodujesz i rysujesz trasę

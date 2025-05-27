@@ -1,5 +1,3 @@
-# app.py
-
 import streamlit as st
 import pandas as pd
 import folium
@@ -7,89 +5,49 @@ from streamlit_folium import st_folium
 from geopy.geocoders import Nominatim
 from st_aggrid import AgGrid
 
-# -------------- PARAMETRY --------------
+# ---------- Parametry ----------
 MAX_KG   = 1200
 MAX_LDM  = 4.8
-
 vehicles = ["TK227CK","TK742AG","ESI461A","ESI4217","TK654CH","TK564CH","OP4556U","SB4432V"]
 days     = ["Poniedziałek","Wtorek","Środa","Czwartek","Piątek","Sobota","Niedziela"]
-slots    = list(range(1,6))
+cities   = ["Warszawa","Kraków","Łódź","Wrocław","Poznań","Gdańsk",
+            "Szczecin","Bydgoszcz","Lublin","Białystok","Katowice"]
 
-# Przykładowa lista miast (można rozbudować)
-cities = [
-    "Warszawa","Kraków","Łódź","Wrocław","Poznań","Gdańsk",
-    "Szczecin","Bydgoszcz","Lublin","Białystok","Katowice",
-    "Bielsko-Biała","Rzeszów","Olsztyn","Opole","Kielce","Zielona Góra"
-]
+# Inicjuj pusty DF zdarzeń
+if "events" not in st.session_state:
+    st.session_state.events = pd.DataFrame(
+        columns=["Vehicle","Day","Miejsce","Type","Masa","LDM"]
+    )
 
-# -------------- INICJALIZACJA DATAFRAME --------------
-cols = ["Vehicle"]
-for d in days:
-    for s in slots:
-        prefix = f"{d}#{s}"
-        cols += [f"{prefix}_City", f"{prefix}_Type", f"{prefix}_Masa", f"{prefix}_LDM"]
+df = st.session_state.events
 
-if "df" not in st.session_state:
-    df0 = pd.DataFrame([{c: "" for c in cols} for _ in vehicles], columns=cols)
-    df0["Vehicle"] = vehicles
-    st.session_state.df = df0
+# Konfiguracja AG-Grid
+from st_aggrid.grid_options_builder import GridOptionsBuilder
 
-df = st.session_state.df
+gb = GridOptionsBuilder.from_dataframe(df)
+gb.configure_column("Vehicle",
+    rowGroup=True, hide=True
+)
+gb.configure_column("Day",
+    cellEditor="agSelectCellEditor",
+    cellEditorParams={"values": days}
+)
+gb.configure_column("Miejsce",
+    cellEditor="agRichSelectCellEditor",
+    cellEditorParams={"values": cities}
+)
+gb.configure_column("Type",
+    cellEditor="agSelectCellEditor",
+    cellEditorParams={"values": ["Z","R"]}
+)
+gb.configure_column("Masa", type=["numericColumn","numberColumnFilter"])
+gb.configure_column("LDM",  type=["numericColumn","numberColumnFilter"])
+gb.configure_grid_options(groupDisplayType="singleColumn")
 
-# -------------- KONFIGURACJA AG-GRID --------------
-columnDefs = [
-    {
-        "headerName": "Pojazd",
-        "field": "Vehicle",
-        "pinned": "left",
-        "editable": False,
-        "lockPosition": True,
-        "cellStyle": {"fontWeight": "bold"}
-    }
-]
-for d in days:
-    children = []
-    for s in slots:
-        prefix = f"{d}#{s}"
-        children += [
-            {
-                "headerName": f"#{s} Miejsce",
-                "field": f"{prefix}_City",
-                "cellEditor": "agRichSelectCellEditor",
-                "cellEditorParams": {"values": cities},
-                "editable": True
-            },
-            {
-                "headerName": f"#{s} Z/R",
-                "field": f"{prefix}_Type",
-                "cellEditor": "agSelectCellEditor",
-                "cellEditorParams": {"values": ["Z", "R"]},
-                "editable": True
-            },
-            {
-                "headerName": f"#{s} Masa",
-                "field": f"{prefix}_Masa",
-                "type": ["numericColumn", "numberColumnFilter"],
-                "editable": True
-            },
-            {
-                "headerName": f"#{s} LDM",
-                "field": f"{prefix}_LDM",
-                "type": ["numericColumn", "numberColumnFilter"],
-                "editable": True
-            },
-        ]
-    columnDefs.append({"headerName": d, "children": children})
+gridOptions = gb.build()
 
-gridOptions = {
-    "columnDefs": columnDefs,
-    "defaultColDef": {"sortable": True, "filter": True, "resizable": True},
-    "suppressRowClickSelection": True,
-    "rowSelection": "single",
-}
-
-st.title("📋 Siatka z 5 slotami dziennie")
-grid_response = AgGrid(
+st.title("🎯 Harmonogram zdarzeń (grupy po pojazdach)")
+res = AgGrid(
     df,
     gridOptions=gridOptions,
     update_mode="MODEL_CHANGED",
@@ -97,63 +55,43 @@ grid_response = AgGrid(
     fit_columns_on_grid_load=True,
     theme="material"
 )
-st.session_state.df = pd.DataFrame(grid_response["data"])
 
-# -------------- RYSOWANIE MAPY --------------
-st.subheader("🧭 Mapa tras")
-m = folium.Map(location=[52.0, 19.0], zoom_start=6)
+# Zapisz zaktualizowany DF
+st.session_state.events = pd.DataFrame(res["data"])
+
+# ---------- Rysowanie mapy ----------
+st.subheader("🗺️ Mapa tras")
+m = folium.Map(location=[52,19], zoom_start=6)
 geolocator = Nominatim(user_agent="flota_app")
-geo_cache = {}
+cache = {}
 
-for _, row in st.session_state.df.iterrows():
-    veh = row["Vehicle"]
-    punkty = []
-    suma_kg = 0.0
-    suma_ldm = 0.0
+for row in st.session_state.events.itertuples():
+    city = row.Miejsce.strip().title()
+    if not city: continue
 
-    for d in days:
-        for s in slots:
-            key_city = f"{d}#{s}_City"
-            key_type = f"{d}#{s}_Type"
-            key_masa = f"{d}#{s}_Masa"
-            key_ldm  = f"{d}#{s}_LDM"
+    # geokoduj
+    coords = cache.get(city)
+    if coords is None:
+        loc = geolocator.geocode(f"{city}, Poland")
+        coords = (loc.latitude, loc.longitude) if loc else None
+        cache[city] = coords
+    if not coords: continue
 
-            city = str(row.get(key_city, "")).strip().title()
-            typ  = str(row.get(key_type, "")).upper()
-            try:
-                masa = float(row.get(key_masa, 0))
-            except:
-                masa = 0.0
-            try:
-                ldm = float(row.get(key_ldm, 0))
-            except:
-                ldm = 0.0
+    popup = (f"<b>{row.Vehicle}</b> {row.Type} {row.Day}<br>"
+             f"{city}<br>Masa: {row.Masa} kg<br>LDM: {row.LDM}")
+    folium.Marker(coords, popup=popup, icon=folium.Icon(color="blue",icon="truck",prefix="fa")).add_to(m)
 
-            if city:
-                coords = geo_cache.get(city)
-                if coords is None:
-                    loc = geolocator.geocode(f"{city}, Poland")
-                    coords = (loc.latitude, loc.longitude) if loc else None
-                    geo_cache[city] = coords
-                if not coords:
-                    continue
-
-                popup = (
-                    f"<b>{veh}</b> {typ} {d} (slot {s})<br>"
-                    f"{city}<br>Masa: {masa} kg<br>LDM: {ldm}"
-                )
-                folium.Marker(
-                    location=coords,
-                    popup=popup,
-                    icon=folium.Icon(color="blue", icon="truck", prefix="fa")
-                ).add_to(m)
-                punkty.append(coords)
-                suma_kg += masa
-                suma_ldm += ldm
-
-    if len(punkty) > 1:
-        kolor = "red" if (suma_kg > MAX_KG or suma_ldm > MAX_LDM) else "green"
-        folium.PolyLine(punkty, color=kolor, weight=4, opacity=0.7).add_to(m)
+# linię rysujemy tylko jeśli 2+ punkty tego samego pojazdu
+for veh in vehicles:
+    pts = [cache[row.Miejsce.strip().title()] 
+           for row in st.session_state.events.itertuples() 
+           if row.Vehicle==veh and cache.get(row.Miejsce.strip().title())]
+    # sumy
+    band = st.session_state.events[st.session_state.events.Vehicle==veh]
+    total_kg = band.Masa.sum()
+    total_ldm = band.LDM.sum()
+    if len(pts)>1:
+        color = "red" if total_kg>MAX_KG or total_ldm>MAX_LDM else "green"
+        folium.PolyLine(pts, color=color, weight=4, opacity=0.7).add_to(m)
 
 st_folium(m, width=1000, height=600)
-st.caption("Legenda: zielona – OK; czerwona – przeciążenie (1.2t / 4.8 LDM).")
